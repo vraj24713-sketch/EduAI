@@ -30,7 +30,8 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [notice, setNotice] = useState("");
   const [question, setQuestion] = useState("");
-
+  const [chatMessages, setChatMessages] = useState([]);
+  const [thinking, setThinking] = useState(false);
   const filteredDocuments = documents.filter((doc) =>
     (doc.name || "").toLowerCase().includes(question.trim().toLowerCase())
   );
@@ -112,6 +113,113 @@ async function loadDocuments() {
     setNotice(`Could not load documents: ${error.message}`);
   }
 }
+
+async function askAssistant(prompt) {
+  const questionText = prompt.trim();
+  if (!questionText || thinking) return;
+
+  setChatMessages((previous) => [
+    ...previous,
+    { role: "user", text: questionText },
+  ]);
+  setQuestion("");
+  setThinking(true);
+  setNotice("");
+
+  try {
+    let availableDocs = documents;
+
+    if (availableDocs.length === 0) {
+      const response = await fetch(`${API}/pdf/`);
+      const data = await response.json();
+      if (!response.ok) throw new Error("Could not load documents.");
+
+      availableDocs = (data.files || []).map((item) => ({
+        id: item.stored_name,
+        name: item.original_name || item.stored_name,
+      }));
+      setDocuments(availableDocs);
+    }
+
+    if (availableDocs.length === 0) {
+      throw new Error("Upload a text-based PDF first, then try again.");
+    }
+
+    const doc = availableDocs[0];
+    const response = await fetch(
+      `${API}/pdf/${encodeURIComponent(doc.id)}/text`
+    );
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || "Could not read the PDF.");
+    }
+
+    const text = (
+      typeof data === "string"
+        ? data
+        : data.text || data.extracted_text || data.content || data.extracted_text_content || ""
+    ).trim();
+
+    if (!text) {
+      throw new Error(
+        "No selectable text was found in this PDF. Try a text-based PDF."
+      );
+    }
+
+    const sentences = text
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+
+    const request = questionText.toLowerCase();
+    let answer;
+
+    if (/summari[sz]e|summary|main points/.test(request)) {
+      answer = sentences.slice(0, 6).join(" ").slice(0, 1800);
+    } else if (/question|quiz|revision|mcq|test me/.test(request)) {
+      answer = sentences
+        .filter((sentence) => sentence.trim().length > 35)
+        .slice(0, 5)
+        .map((sentence, index) => `${index + 1}. Explain this idea: ${sentence.trim()}`)
+        .join("\n\n");
+    } else if (/key concepts|important concepts|definitions/.test(request)) {
+      answer = sentences
+        .filter((sentence) => sentence.trim().length > 35)
+        .slice(0, 7)
+        .map((sentence) => `• ${sentence.trim()}`)
+        .join("\n\n");
+    } else {
+      const terms = request
+        .replace(/[^\w\s]/g, " ")
+        .split(/\s+/)
+        .filter((word) => word.length > 3);
+
+      const matches = sentences.filter((sentence) =>
+        terms.some((term) => sentence.toLowerCase().includes(term))
+      );
+
+      answer = matches.length
+        ? matches.slice(0, 5).join(" ").slice(0, 1800)
+        : `I couldn't find a clear matching passage in "${doc.name}". Try asking about a specific term from the document, or request a summary.`;
+    }
+
+    setChatMessages((previous) => [
+      ...previous,
+      {
+        role: "assistant",
+        text: `Based on "${doc.name}":\n\n${answer || "Not enough readable text to generate a response."}`,
+      },
+    ]);
+  } catch (error) {
+    setChatMessages((previous) => [
+      ...previous,
+      { role: "assistant", text: error.message },
+    ]);
+  } finally {
+    setThinking(false);
+  }
+}
+
 function navigate(section) {
   setActive(section);
   setMobileMenu(false);
@@ -442,7 +550,7 @@ function navigate(section) {
                     <strong>EduAI Assistant</strong>
                     <span>PDF study workspace</span>
                   </div>
-                  <span className="coming-soon">AI CONNECTION PENDING</span>
+                  <span className="settings-status">LOCAL STUDY MODE</span>
                 </div>
 
                 <div className="chat-message">
@@ -450,15 +558,28 @@ function navigate(section) {
                   <div className="message-bubble">
                     <strong>Let's study smarter.</strong>
                     <p>
-                      Upload a PDF to prepare your notes for summarization and
-                      questions. Real AI responses will be connected later.
+                      I can create a quick summary, pull out key passages, and
+                      generate revision prompts from the text in your first uploaded PDF.
+                      This local study mode does not use a paid AI service.
                     </p>
                   </div>
                 </div>
 
+                <div className="chat-history" aria-live="polite">
+                  {chatMessages.map((message, index) => (
+                    <div className="chat-message" key={`${message.role}-${index}`}>
+                      <div className="message-bubble">
+                        <strong>{message.role === "user" ? "You" : "EduAI Assistant"}</strong>
+                        <p style={{ whiteSpace: "pre-wrap" }}>{message.text}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {thinking && <p className="assistant-disclaimer">Reading your document...</p>}
+                </div>
+
                 <div className="prompt-chips">
                   {["Summarize my notes", "Explain key concepts", "Make revision questions"].map((prompt) => (
-                    <button key={prompt} onClick={() => setQuestion(prompt)}>
+                    <button key={prompt} type="button" disabled={thinking} onClick={() => askAssistant(prompt)}>
                       <Sparkles size={14} /> {prompt}
                     </button>
                   ))}
@@ -467,22 +588,23 @@ function navigate(section) {
                 <form
                   className="chat-input-row"
                   onSubmit={(event) => {
-                    event.preventDefault();
-                    setNotice("AI responses are not connected yet.");
+                 event.preventDefault();
+                 askAssistant(question);
                   }}
                 >
                   <input
                     value={question}
                     onChange={(event) => setQuestion(event.target.value)}
                     placeholder="Ask about your study material..."
+                    disabled={thinking}
                   />
-                  <button className="send-button" type="submit" aria-label="Send question">
+                  <button className="send-button" type="submit" aria-label="Send question" disabled={thinking || !question.trim()}>
                     <ArrowUpRight size={20} />
                   </button>
                 </form>
                 {notice && <div className="notice">{notice}</div>}
                 <p className="assistant-disclaimer">
-                  Questions aren't sent to an AI provider yet.
+                  Local study mode uses text extraction and matching, not a generative AI model. It reads the first uploaded PDF.
                 </p>
               </div>
             </section>
