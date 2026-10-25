@@ -1,7 +1,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import pdf, auth
+from app.routers import pdf, auth, ai
 
 app = FastAPI(title="EduAI API", version="1.0.0")
 
@@ -20,6 +20,7 @@ app.add_middleware(
 
 app.include_router(pdf.router, prefix="/pdf", tags=["PDF"])
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(ai.router, prefix="/ai", tags=["AI Study Assistant"])
 
 @app.get("/")
 def root():

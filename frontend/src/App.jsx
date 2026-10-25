@@ -1,4 +1,3 @@
-
 import { useState } from "react";
 import {
   BrainCircuit,
@@ -118,103 +117,56 @@ async function askAssistant(prompt) {
   const questionText = prompt.trim();
   if (!questionText || thinking) return;
 
-  setChatMessages((previous) => [
-    ...previous,
-    { role: "user", text: questionText },
-  ]);
+  setChatMessages((prev) => [...prev, { role: "user", text: questionText }]);
   setQuestion("");
   setThinking(true);
   setNotice("");
 
   try {
-    let availableDocs = documents;
-
-    if (availableDocs.length === 0) {
-      const response = await fetch(`${API}/pdf/`);
-      const data = await response.json();
-      if (!response.ok) throw new Error("Could not load documents.");
-
-      availableDocs = (data.files || []).map((item) => ({
-        id: item.stored_name,
-        name: item.original_name || item.stored_name,
+    let docs = documents;
+    if (!docs.length) {
+      const listRes = await fetch(`${API}/pdf/`);
+      const listData = await listRes.json();
+      if (!listRes.ok) throw new Error(listData.detail || "Could not load PDFs.");
+      docs = (listData.files || []).map((f) => ({
+        id: f.stored_name,
+        name: f.original_name || f.stored_name,
       }));
-      setDocuments(availableDocs);
+      setDocuments(docs);
+    }
+    if (!docs.length) throw new Error("Upload a PDF about your topic first.");
+
+    // Read uploaded PDFs so the AI can use the document that contains the topic.
+    const chunks = [];
+    for (const doc of docs) {
+      if (chunks.join("\n\n").length >= 18000) break;
+      const pdfRes = await fetch(`${API}/pdf/${encodeURIComponent(doc.id)}/text`);
+      const pdfData = await pdfRes.json();
+      if (!pdfRes.ok) continue;
+      const text = (typeof pdfData === "string"
+        ? pdfData
+        : pdfData.text || pdfData.extracted_text || pdfData.content || pdfData.extracted_text_content || "").trim();
+      if (text) chunks.push(`DOCUMENT: ${doc.name || "Study notes"}\n${text}`);
     }
 
-    if (availableDocs.length === 0) {
-      throw new Error("Upload a text-based PDF first, then try again.");
-    }
+    const context = chunks.join("\n\n").slice(0, 20000);
+    if (!context) throw new Error("No readable text found in your PDFs. Upload a text-based PDF.");
 
-    const doc = availableDocs[0];
-    const response = await fetch(
-      `${API}/pdf/${encodeURIComponent(doc.id)}/text`
-    );
-    const data = await response.json();
+    const aiRes = await fetch(`${API}/ai/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: questionText,
+        context,
+        document_name: docs.map((d) => d.name).join(", ").slice(0, 255) || "Study notes",
+      }),
+    });
+    const result = await aiRes.json();
+    if (!aiRes.ok) throw new Error(result.detail || "AI request failed.");
 
-    if (!response.ok) {
-      throw new Error(data.detail || "Could not read the PDF.");
-    }
-
-    const text = (
-      typeof data === "string"
-        ? data
-        : data.text || data.extracted_text || data.content || data.extracted_text_content || ""
-    ).trim();
-
-    if (!text) {
-      throw new Error(
-        "No selectable text was found in this PDF. Try a text-based PDF."
-      );
-    }
-
-    const sentences = text
-      .replace(/\s+/g, " ")
-      .match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
-
-    const request = questionText.toLowerCase();
-    let answer;
-
-    if (/summari[sz]e|summary|main points/.test(request)) {
-      answer = sentences.slice(0, 6).join(" ").slice(0, 1800);
-    } else if (/question|quiz|revision|mcq|test me/.test(request)) {
-      answer = sentences
-        .filter((sentence) => sentence.trim().length > 35)
-        .slice(0, 5)
-        .map((sentence, index) => `${index + 1}. Explain this idea: ${sentence.trim()}`)
-        .join("\n\n");
-    } else if (/key concepts|important concepts|definitions/.test(request)) {
-      answer = sentences
-        .filter((sentence) => sentence.trim().length > 35)
-        .slice(0, 7)
-        .map((sentence) => `• ${sentence.trim()}`)
-        .join("\n\n");
-    } else {
-      const terms = request
-        .replace(/[^\w\s]/g, " ")
-        .split(/\s+/)
-        .filter((word) => word.length > 3);
-
-      const matches = sentences.filter((sentence) =>
-        terms.some((term) => sentence.toLowerCase().includes(term))
-      );
-
-      answer = matches.length
-        ? matches.slice(0, 5).join(" ").slice(0, 1800)
-        : `I couldn't find a clear matching passage in "${doc.name}". Try asking about a specific term from the document, or request a summary.`;
-    }
-
-    setChatMessages((previous) => [
-      ...previous,
-      {
-        role: "assistant",
-        text: `Based on "${doc.name}":\n\n${answer || "Not enough readable text to generate a response."}`,
-      },
-    ]);
-  } catch (error) {
-    setChatMessages((previous) => [
-      ...previous,
-      { role: "assistant", text: error.message },
-    ]);
+    setChatMessages((prev) => [...prev, { role: "assistant", text: result.answer }]);
+  } catch (err) {
+    setChatMessages((prev) => [...prev, { role: "assistant", text: `Error: ${err.message}` }]);
   } finally {
     setThinking(false);
   }
@@ -418,7 +370,7 @@ function navigate(section) {
                     <div className="upload-illustration"><Upload size={24} /></div>
                     <strong>{file ? file.name : "Choose a PDF to get started"}</strong>
                     <span>{file ? "Ready to upload" : "Click here to browse your files"}</span>
-                    <span className="file-limit">PDF format · Maximum 10 MB</span>
+                    <span className="file-limit">PDF format Â· Maximum 10 MB</span>
                   </label>
 
                   <input
@@ -467,7 +419,7 @@ function navigate(section) {
                           <div className="pdf-icon"><FileText size={20} /></div>
                           <div className="document-info">
                             <strong>{doc.name}</strong>
-                            <span>{doc.pages ?? "—"} pages · PDF document</span>
+                            <span>{doc.pages ?? "â€”"} pages Â· PDF document</span>
                           </div>
                           <CheckCircle2 className="document-check" size={18} />
                         </div>
@@ -527,7 +479,7 @@ function navigate(section) {
                         <div className="pdf-icon"><FileText size={20} /></div>
                         <div className="document-info">
                           <strong>{doc.name}</strong>
-                          <span>{doc.pages ?? "Unknown"} pages · {doc.characters ?? "Text not loaded"} characters</span>
+                          <span>{doc.pages ?? "Unknown"} pages Â· {doc.characters ?? "Text not loaded"} characters</span>
                         </div>
                       </div>
                     ))}
@@ -541,7 +493,7 @@ function navigate(section) {
             <section className="inner-page">
               <div className="eyebrow"><Sparkles size={14} /> YOUR LEARNING COMPANION</div>
               <h1>AI Study Assistant<span>.</span></h1>
-              <p className="welcome-subtitle">Your study assistant interface is ready.</p>
+              <p className="welcome-subtitle">Ask questions about your uploaded study documents.</p>
 
               <div className="panel assistant-panel">
                 <div className="assistant-header">
@@ -550,7 +502,7 @@ function navigate(section) {
                     <strong>EduAI Assistant</strong>
                     <span>PDF study workspace</span>
                   </div>
-                  <span className="settings-status">LOCAL STUDY MODE</span>
+                  <span className="settings-status">OLLAMA AI</span>
                 </div>
 
                 <div className="chat-message">
@@ -558,9 +510,7 @@ function navigate(section) {
                   <div className="message-bubble">
                     <strong>Let's study smarter.</strong>
                     <p>
-                      I can create a quick summary, pull out key passages, and
-                      generate revision prompts from the text in your first uploaded PDF.
-                      This local study mode does not use a paid AI service.
+                      I can answer questions using the text in your uploaded PDFs, powered by your local Qwen model through Ollama.
                     </p>
                   </div>
                 </div>
@@ -604,7 +554,7 @@ function navigate(section) {
                 </form>
                 {notice && <div className="notice">{notice}</div>}
                 <p className="assistant-disclaimer">
-                  Local study mode uses text extraction and matching, not a generative AI model. It reads the first uploaded PDF.
+                  Powered by local Qwen AI through Ollama. Upload a PDF containing the topic you want to discuss.
                 </p>
               </div>
             </section>
@@ -621,8 +571,8 @@ function navigate(section) {
                   <span className="settings-status">Local development</span>
                 </div>
                 <div className="settings-row">
-                  <div><strong>AI provider</strong><p>Not connected yet.</p></div>
-                  <span className="coming-soon">NOT CONNECTED</span>
+                  <div><strong>AI provider</strong><p>Ollama running locally with Qwen 2.5 3B.</p></div>
+                  <span className="settings-status">CONNECTED</span>
                 </div>
                 <div className="settings-row">
                   <div><strong>PDF uploads</strong><p>PDF files up to 10 MB.</p></div>
@@ -633,7 +583,7 @@ function navigate(section) {
           )}
 
           <footer className="footer">
-            <span>EduAI <span className="footer-dot">✦</span> Learn with purpose.</span>
+            <span>EduAI <span className="footer-dot">âœ¦</span> Learn with purpose.</span>
             <span>Built for your next breakthrough.</span>
           </footer>
         </div>
